@@ -1,0 +1,206 @@
+#include <WiFi.h>
+#include <esp_now.h>
+
+#define LED1_PIN 2   // LED for RCB
+#define LED2_PIN 4   // LED for Mumbai
+#define LED3_PIN 5   // LED for CSK (NEW)
+#define SOLD_BUTTON 12  
+#define NOT_SOLD_BUTTON 13  
+#define RESET_BUTTON 14  
+
+typedef struct {
+    int senderID;
+    float x_angle; 
+    float y_angle;
+    float z_angle; 
+} SensorData;
+
+SensorData receivedData;
+
+// Player structure
+struct Player {
+    String name;
+    float baseValue;
+    float currentBid;
+    bool isSold;
+    int bidCount;  
+    String lastBidder;  
+};
+
+// Player List
+Player players[] = {
+    {"Sachin", 1000, 1000, false, 0, ""},
+    {"Rohit", 2000, 2000, false, 0, ""},
+    {"Rahul", 3000, 3000, false, 0, ""},
+    {"Virat", 4000, 4000, false, 0, ""}
+};
+
+int currentPlayerIndex = 0;  
+bool auctionActive = true;
+int lastBidderID = 0;  // Tracks last team that bid (0 = none, 1 = RCB, 2 = Mumbai, 3 = CSK)
+
+// Sold & Unsold Lists
+Player soldPlayers[4];
+int soldCount = 0;
+Player unsoldPlayers[4];
+int unsoldCount = 0;
+
+// Button States for Edge Detection
+bool lastSoldButtonState = HIGH;
+bool lastNotSoldButtonState = HIGH;
+bool lastResetButtonState = HIGH;
+
+// **Handle received data**
+void OnDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+    if (!auctionActive) return;
+
+    memcpy(&receivedData, data, sizeof(receivedData));
+    Player &currentPlayer = players[currentPlayerIndex];
+
+    // **Check if the team is allowed to bid (Not the same as lastBidderID)**
+    if (receivedData.senderID != lastBidderID) {
+        if (receivedData.y_angle <= -70) {
+            currentPlayer.currentBid *= 1.1;
+            currentPlayer.bidCount++;  
+            lastBidderID = receivedData.senderID;  // Update last bidder to prevent consecutive bids
+            
+            if (receivedData.senderID == 1) currentPlayer.lastBidder = "RCB";
+            if (receivedData.senderID == 2) currentPlayer.lastBidder = "Mumbai";
+            if (receivedData.senderID == 3) currentPlayer.lastBidder = "CSK";
+
+            Serial.print("💰 ");
+            Serial.print(currentPlayer.lastBidder);
+            Serial.print(" Bids: ");
+            Serial.print(currentPlayer.currentBid);
+            Serial.print(" (Total Bids: ");
+            Serial.print(currentPlayer.bidCount);
+            Serial.println(")");
+            printAuctionStatus();
+
+            // **LED Logic Fix**: Turn OFF all LEDs first, then turn ON the new bidder's LED
+            digitalWrite(LED1_PIN, LOW);
+            digitalWrite(LED2_PIN, LOW);
+            digitalWrite(LED3_PIN, LOW);
+            
+            if (receivedData.senderID == 1) digitalWrite(LED1_PIN, HIGH);
+            if (receivedData.senderID == 2) digitalWrite(LED2_PIN, HIGH);
+            if (receivedData.senderID == 3) digitalWrite(LED3_PIN, HIGH);
+        }
+    }
+}
+
+// **Handle button presses with edge detection**
+void checkButtons() {
+    bool soldButtonState = digitalRead(SOLD_BUTTON);
+    bool notSoldButtonState = digitalRead(NOT_SOLD_BUTTON);
+    bool resetButtonState = digitalRead(RESET_BUTTON);
+
+    Player &currentPlayer = players[currentPlayerIndex];
+
+    // **"Sold" Button Fresh Press**
+    if (lastSoldButtonState == HIGH && soldButtonState == LOW) {
+        if (auctionActive) {  
+            currentPlayer.isSold = true;
+            soldPlayers[soldCount++] = currentPlayer;
+            Serial.print(currentPlayer.name);
+            Serial.print(" is SOLD for: ");
+            Serial.print(currentPlayer.currentBid);
+            Serial.print(" by ");
+            Serial.println(currentPlayer.lastBidder);
+            moveToNextPlayer();
+        }
+        digitalWrite(LED1_PIN, LOW);
+        digitalWrite(LED2_PIN, LOW);
+        digitalWrite(LED3_PIN, LOW);
+    }
+
+    // **"Not Sold" Button Fresh Press**
+    if (lastNotSoldButtonState == HIGH && notSoldButtonState == LOW) {
+        if (auctionActive && currentPlayer.bidCount == 0) {  
+            currentPlayer.isSold = false;
+            unsoldPlayers[unsoldCount++] = currentPlayer;
+            Serial.print(currentPlayer.name);
+            Serial.println(" is NOT SOLD.");
+            moveToNextPlayer();
+        } else {
+            Serial.println("❌ Cannot mark as NOT SOLD. Bids were placed!");
+        }
+        digitalWrite(LED1_PIN, LOW);
+        digitalWrite(LED2_PIN, LOW);
+        digitalWrite(LED3_PIN, LOW);
+    }
+
+    // **"Reset" Button Fresh Press**
+    if (lastResetButtonState == HIGH && resetButtonState == LOW) {
+        resetAuction();
+        digitalWrite(LED1_PIN, LOW);
+        digitalWrite(LED2_PIN, LOW);
+        digitalWrite(LED3_PIN, LOW);
+    }
+
+    lastSoldButtonState = soldButtonState;
+    lastNotSoldButtonState = notSoldButtonState;
+    lastResetButtonState = resetButtonState;
+}
+
+void printAuctionStatus() {
+    Serial.print("📢 Current Player: ");
+    Serial.print(players[currentPlayerIndex].name);
+    Serial.print(" | Current Bid: ");
+    Serial.println(players[currentPlayerIndex].currentBid);
+}
+
+void moveToNextPlayer() {
+    currentPlayerIndex++;
+    lastBidderID = 0;  // Reset last bidder for the new player
+    if (currentPlayerIndex >= 4) {
+        auctionActive = false;
+        Serial.println("🏁 Auction Ended!");
+    } else {
+        Serial.print("➡ Next Player: ");
+        Serial.println(players[currentPlayerIndex].name);
+    }
+}
+
+void resetAuction() {
+    currentPlayerIndex = 0;
+    auctionActive = true;
+    soldCount = 0;
+    unsoldCount = 0;
+    lastBidderID = 0;  // Reset last bidder
+    for (int i = 0; i < 4; i++) {
+        players[i].currentBid = players[i].baseValue;
+        players[i].bidCount = 0;
+        players[i].lastBidder = "";
+        players[i].isSold = false;
+    }
+    Serial.println("🔄 Auction Reset!");
+}
+
+void setup() {
+    Serial.begin(115200);
+    WiFi.mode(WIFI_STA);
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("Error initializing ESP-NOW");
+        return;
+    }
+    esp_now_register_recv_cb(OnDataRecv);
+
+    pinMode(LED1_PIN, OUTPUT);
+    pinMode(LED2_PIN, OUTPUT);
+    pinMode(LED3_PIN, OUTPUT);
+    pinMode(SOLD_BUTTON, INPUT_PULLUP);
+    pinMode(NOT_SOLD_BUTTON, INPUT_PULLUP);
+    pinMode(RESET_BUTTON, INPUT_PULLUP);
+
+    digitalWrite(LED1_PIN, LOW);
+    digitalWrite(LED2_PIN, LOW);
+    digitalWrite(LED3_PIN, LOW);
+    Serial.println("🏆 Auction Started!");
+    Serial.print("Current Player: "); Serial.println(players[currentPlayerIndex].name);
+}
+
+void loop() {
+    checkButtons();
+    delay(50);
+}

@@ -1,0 +1,73 @@
+#include <WiFi.h>
+#include <esp_now.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+
+Adafruit_MPU6050 mpu;
+
+uint8_t receiverMAC[] = {0xF8, 0xB3, 0xB7, 0x7C, 0x4B, 0xB8};  // Receiver MAC Address
+
+// Structure to send data
+typedef struct {
+    int senderID;
+    float x_angle;
+    float y_angle;
+    float z_angle;
+} SensorData;
+
+SensorData dataToSend;
+
+// Send callback function
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+    Serial.print("Last Packet Send Status: ");
+    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
+}
+
+void setup() {
+    Serial.begin(115200);
+    WiFi.mode(WIFI_STA);
+
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("Error initializing ESP-NOW");
+        return;
+    }
+
+    esp_now_register_send_cb(OnDataSent);
+
+    esp_now_peer_info_t peerInfo;
+    memset(&peerInfo, 0, sizeof(peerInfo));
+    memcpy(peerInfo.peer_addr, receiverMAC, 6);
+    peerInfo.channel = 0;
+    peerInfo.encrypt = false;
+
+    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+        Serial.println("Failed to add peer");
+        return;
+    }
+
+    Wire.begin();
+    if (!mpu.begin()) {
+        Serial.println("Failed to find MPU6050 chip!");
+        while (1);
+    }
+    Serial.println("MPU6050 Found!");
+}
+
+void loop() {
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+
+    dataToSend.senderID = 3;  // Sender 3
+    dataToSend.x_angle = atan2(a.acceleration.y, a.acceleration.z) * 180 / PI;
+    dataToSend.y_angle = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180 / PI;
+    dataToSend.z_angle = g.gyro.z;
+
+    Serial.print("Sender 3 - X: "); Serial.print(dataToSend.x_angle); Serial.print("°, ");
+    Serial.print("Y: "); Serial.print(dataToSend.y_angle); Serial.print("°, ");
+    Serial.print("Z: "); Serial.print(dataToSend.z_angle); Serial.println("°");
+
+    esp_now_send(receiverMAC, (uint8_t *)&dataToSend, sizeof(dataToSend));
+
+    delay(50);
+}
